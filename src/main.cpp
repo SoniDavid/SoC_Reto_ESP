@@ -66,10 +66,12 @@ void setup_wifi() {
   }
 }
 
-void process_uart2_input() {
+void process_uart2_input(float &Throttle,float &BrakeTorque) {
   float rpm_ = -1.0;
   float vl_ = -1.0;
   int gear_ = -1.0;
+  float Throttle_ = 0;
+  int BrakeTorque_ = 0;
   now = millis();
 
 
@@ -80,7 +82,10 @@ void process_uart2_input() {
     line.trim();
     if(line.startsWith("I")) {
       // Scan received string
-      if (sscanf(line.c_str(), "I%f,%f,%d,", &rpm_, &vl_, &gear_) == 3) {
+      if (sscanf(line.c_str(), "I%f,%f,%d,%f,%d,", &rpm_, &vl_, &gear_, &Throttle_, &BrakeTorque_) == 5) {
+        if(BrakeTorque_ > 0) BrakeTorque = 400;
+        else BrakeTorque = 0;
+        Throttle = ((Throttle_ / 38.0f) * 50.0f) + 5;
         // Print received data
         Serial.print("Received line: ");
         Serial.println(line);
@@ -88,6 +93,7 @@ void process_uart2_input() {
     }
   }
 
+  
   // MQTT
   if(now - lastMsg > msgInterval){
     StaticJsonDocument<200> jsonDocument;
@@ -169,6 +175,8 @@ void setup() {
 }
 
 void loop() {
+  float Throttle = 5;
+  float BrakeTorque = 0;
 
   //MQTT
   if (!client.connected()) {
@@ -176,11 +184,11 @@ void loop() {
   }
   client.loop();
 
-  process_uart2_input();
+  process_uart2_input(Throttle, BrakeTorque);
 
   // Motor model process
-  EngTrModel_U.Throttle = 50.0;
-  EngTrModel_U.BrakeTorque = 0.0;
+  EngTrModel_U.Throttle = Throttle;
+  EngTrModel_U.BrakeTorque = BrakeTorque;
   EngTrModel_step();
 
   float rpm = EngTrModel_Y.VehicleSpeed;
