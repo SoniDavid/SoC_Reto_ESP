@@ -11,12 +11,15 @@ extern "C" {
 #define TXD2 17   // UART2 TX
 
 // --- Datos de tu red WiFi ---
+// const char* ssid = "Bacalao con jamon";
+// const char* password = "123456789";
 const char* ssid = "DASC";
 const char* password = "44034403";
 
 // --- Datos del Broker Mosquitto en la Raspberry Pi ---
 
-const char* mqtt_server = "192.168.72.235";
+// const char* mqtt_server = "192.168.72.235";
+const char* mqtt_server = "192.168.202.251";
 const int mqtt_port = 1883; // Puerto estándar de MQTT
 const char* mqtt_user = ""; // Si configuraste usuario en Mosquitto
 const char* mqtt_password = ""; // Si configuraste contraseña en Mosquitto
@@ -24,6 +27,15 @@ const char* mqtt_password = ""; // Si configuraste contraseña en Mosquitto
 // --- Tópico MQTT para publicar ---
 
 const char* publish_topic = "motor/data";
+const char* subscribe_topic = "motor/command";
+
+
+// --- Model Engine ---
+float Throttle = 5;
+float BrakeTorque = 0;
+bool callback_status = false;
+float acc = 0;
+float brake = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -56,7 +68,7 @@ void setup_wifi() {
     if (client.connect("ESP8266Client", mqtt_user, mqtt_password)) {
       Serial.println("conectado");
       // Puedes suscribirte a tópicos aquí si lo deseas
-      // client.subscribe("esp32/control");
+      client.subscribe("motor/command");
     } else {
       Serial.print("falló, rc=");
       Serial.print(client.state());
@@ -66,34 +78,65 @@ void setup_wifi() {
   }
 }
 
-void process_uart2_input(float &Throttle,float &BrakeTorque) {
-  float rpm_ = -1.0;
-  float vl_ = -1.0;
-  int gear_ = -1.0;
-  float Throttle_ = 0;
-  int BrakeTorque_ = 0;
-  now = millis();
+// MQTT Callback
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Mensaje recibido [");
+  Serial.print(topic);
+  Serial.print("]: ");
 
+  // Convert to string
+  String jsonStr;
+  for (unsigned int i = 0; i < length; i++) {
+    jsonStr += (char)payload[i];
+  }
+  Serial.println(jsonStr);
+
+  // Parse JSON
+  StaticJsonDocument<200> doc;
+  DeserializationError err = deserializeJson(doc, jsonStr);
+  if (err) {
+    Serial.println("Error al parsear JSON");
+    return;
+  }
+
+  acc = doc["acceleration"];
+  brake = doc["brake"];
+  int callback_status_char = doc["callback_status"];
+  if(callback_status_char == 1)
+    callback_status = true;
+  else callback_status = false;
+
+  Serial.printf("Acelerador: %.2f | Frenos: %.2f\n", acc, brake);
+}
+
+void process_uart2_input(float &Throttle,float &BrakeTorque) {
+  float Throttle_ = -1.0;
+  int BrakeTorque_ = -1.0;
 
   // Read Serial
   if(Serial2.available())
   {
     String line = Serial2.readStringUntil('E');
     line.trim();
+    Serial.print("Received: ");
+    Serial.println();
     if(line.startsWith("I")) {
       // Scan received string
-      if (sscanf(line.c_str(), "I%f,%f,%d,%f,%d,", &rpm_, &vl_, &gear_, &Throttle_, &BrakeTorque_) == 5) {
-        if(BrakeTorque_ > 0) BrakeTorque = 400;
+      if (sscanf(line.c_str(), "I%f,%d,", &Throttle_, &BrakeTorque_) == 2) {
+        if(BrakeTorque_ > 0) BrakeTorque = 2000;
         else BrakeTorque = 0;
-        Throttle = ((Throttle_ / 38.0f) * 50.0f) + 5;
+        Throttle = ((Throttle_ / 40.0f) * 400.0f) + 5;
         // Print received data
         Serial.print("Received line: ");
         Serial.println(line);
       }
     }
   }
+}
 
-  
+void send_MQTT(float rpm_, float vl_, float gear_){
+  now = millis();
+
   // MQTT
   if(now - lastMsg > msgInterval){
     StaticJsonDocument<200> jsonDocument;
@@ -170,32 +213,39 @@ void setup() {
   // Setup wifi and MQTT
   setup_wifi();
   client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
 
   Serial.println("ESP32 listo para recibir datos por UART");
 }
 
 void loop() {
-  float Throttle = 5;
-  float BrakeTorque = 0;
+  Throttle = 5;
+  BrakeTorque = 0;
 
   //MQTT
   if (!client.connected()) {
-    reconnect();
+   reconnect();
   }
   client.loop();
 
   process_uart2_input(Throttle, BrakeTorque);
+  delay(150);
 
-  // Motor model process
+  if(callback_status){
+    Throttle = acc;
+    BrakeTorque = brake;
+  }
+
+   // Motor model process
   EngTrModel_U.Throttle = Throttle;
   EngTrModel_U.BrakeTorque = BrakeTorque;
   EngTrModel_step();
 
-  float rpm = EngTrModel_Y.VehicleSpeed;
-  float vl = EngTrModel_Y.EngineSpeed;
+  float rpm = EngTrModel_Y.EngineSpeed;
+  float vl = EngTrModel_Y.VehicleSpeed;
   float gear = EngTrModel_Y.Gear;
 
   process_uart2_output(rpm, vl, gear);
 
-  delay(100);
+  send_MQTT(rpm, vl, gear);
 }
